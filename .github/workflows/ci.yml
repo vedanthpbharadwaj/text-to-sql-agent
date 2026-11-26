@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: admin
+          POSTGRES_DB: nyc_taxi
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U admin"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGUSER: admin
+      PGPASSWORD: admin
+      PGDATABASE: nyc_taxi
+      ADMIN_DATABASE_URL: postgresql://admin:admin@localhost:5432/nyc_taxi
+      TEST_DATABASE_URL: postgresql://analyst_ro:analyst_ro@localhost:5432/nyc_taxi
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Initialise database
+        run: |
+          psql -v ON_ERROR_STOP=1 -f db/init/01_schema.sql
+          POSTGRES_USER=admin POSTGRES_DB=nyc_taxi ANALYST_RO_PASSWORD=analyst_ro bash db/init/02_readonly_role.sh
+          psql -v ON_ERROR_STOP=1 -f db/init/03_indexes.sql
+          python scripts/seed_sample.py --rows 50000
+
+      - name: Benchmark file is up to date
+        run: |
+          python eval/build_benchmark.py
+          git diff --exit-code eval/benchmark.jsonl
+
+      - name: Tests (unit + integration)
+        run: pytest -v
